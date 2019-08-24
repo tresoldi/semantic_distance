@@ -4,15 +4,16 @@
 # Import Python standard libraries
 import argparse
 import csv
+import datetime
 from itertools import chain, combinations, islice, tee
+from operator import itemgetter
 import os.path
 
 # Import external libraries
 import networkx as nx
+import scipy
 
 # TODO: better/user-defined exponent scalars
-# TODO: add avarage as reported?
-# TODO: look for longer path with intermediate steps in the first path?
 
 def _pairwise(iterable):
     """
@@ -125,6 +126,7 @@ def comp_weight(path, graph):
         ])
 
 
+# Note to self: really wish a functional lazy evaluation here...
 def output_distances(graph, args):
     """
     Output the distances and paths for all potential pairs in the graph.
@@ -146,47 +148,58 @@ def output_distances(graph, args):
     # Collect data for all possible combinations, operating on the sorted
     # list of concept glosses; we need to use a counter, instead of the
     # index from the enumeration, as we will skip over combinations with
-    # no paths
+    # no paths; we also cache the number of total combinations
+    ncr = scipy.special.comb(len(graph.nodes), 2)
     row_count = 1
     for comb_idx, comb in enumerate(combinations(sorted(graph.nodes), 2)):
-        if comb_idx % 250 == 0:
-            print("Processing combination #%i..." % comb_idx)
+        if comb_idx % 100 == 0:
+            print("[%s] Processing combination #%i/%i..." %
+                (datetime.datetime.now(), comb_idx+1, ncr))
  
         # Collect args.paths shortest paths for the combination, skipping
         # over if there is no path for the current combination. This will
         # collect a higher number of paths, so we can look for the weight of
         # the best path that does not include the intermediate steps of the
-        # single best path
+        # single best path. Note that we will compute all weights and sort,
+        # as the implementation of Yen's algorithm is not returning the
+        # best paths in order.
         # TODO: what if the single best is a direct one?
-        # TODO: set the multiplier from the command line
         try:
             k_paths = list(islice(
                 nx.shortest_simple_paths(graph, comb[0], comb[1], weight='weight'),
-                args.k*10))
+                args.k*args.search))
         except:
             # no path
             continue
+
+        # Compute the cumulative weight associated with each path 
+        k_weights = [comp_weight(path, graph) for path in k_paths]
+
+        # Build a sorted list of (path, weights) elements
+        paths = list(zip(k_paths, k_weights))
+        paths = sorted(paths, key=itemgetter(1))
             
         # Get the sub-optimal best path without the intermediate steps of
         # the best global path; if no exclude path is found, we will use the
         # score from the worst one we collected
-        excludes = k_paths[0][1:-1]
+        excludes = set(chain.from_iterable([path[0][1:-1] for path in paths[:args.k]]))
         exclude_paths = [
-            path for path in k_paths
-            if not any([concept in path for concept in excludes])
+            path for path in paths
+            if not any([concept in path[0] for concept in excludes])
         ]
         
         if exclude_paths:
-            paths = k_paths[:3] + [exclude_paths[0]]
+            paths = paths[:3] + [exclude_paths[0]]
         else:
-            paths = k_paths[:3] + [k_paths[-1]]
-    
-        # Compute the cumulative weight associated with each path 
-        weights = [comp_weight(path, graph) for path in paths]
+            paths = paths[:3] + [paths[-1]]
+
+        # For easier manipulation, extract list of concepts and weights and
+        # proceed building the output
+        concept_paths, weights = zip(*paths)
 
         # Turn paths and weights into a strings and collect the number of steps
-        steps = [str(len(path)-2) for path in paths]
-        path_strs = ["/".join(path) for path in paths]
+        steps = [str(len(path)-2) for path in concept_paths]
+        path_strs = ["/".join(path) for path in concept_paths]
         weights_strs = ["%0.2f" % weight for weight in weights]
 
         # Build buffer and write
@@ -278,6 +291,11 @@ if __name__ == "__main__":
         type=int,
         help="Maximum number of best paths to collect for each pair (default: 3)",
         default=3)
+    parser.add_argument(
+        "--search",
+        type=int,
+        help="Multiplier for the search space of best suboptimal path (default: 25)",
+        default=25)
     ARGS = parser.parse_args()
 
     main(ARGS)
