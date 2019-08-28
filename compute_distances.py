@@ -14,6 +14,10 @@ import networkx as nx
 import scipy
 
 # TODO: better/user-defined exponent scalars
+# TODO: whether to include suboptimal -- make sure it is working
+# TODO: specify how many in the output
+# TODO: should the avarage be over everything or just what is reported?
+
 
 def _pairwise(iterable):
     """
@@ -23,7 +27,7 @@ def _pairwise(iterable):
 
     "s -> (s[0], s[1]), (s[1], s[2]), (s[2], s[3]) ...
     """
-    
+
     item_a, item_b = tee(iterable)
     next(item_a, None)
 
@@ -34,7 +38,7 @@ def read_concepticon(args):
     """
     Read standard Concepticon data.
     """
-    
+
     with open(os.path.join(args.input, "concepticon.tsv")) as tsvfile:
         reader = csv.DictReader(tsvfile, delimiter="\t")
         data = {
@@ -89,6 +93,35 @@ def compute_weights(concepticon, infomap, colexifications, args):
     max_languages = max([colex['languages'] for colex in colexifications])
     max_words = max([colex['words'] for colex in colexifications])
 
+    # Obtain family, language, and word counts for all concepts
+    concepts = set(chain.from_iterable([
+        [colex['concepticon_gloss_a'], colex['concepticon_gloss_b']]
+        for colex in colexifications
+            ]))
+    concept_families = {
+        concept : max([
+            colex['families'] for colex in colexifications if
+            concept == colex['concepticon_gloss_a'] or
+            concept == colex['concepticon_gloss_b'] ])
+        for concept in concepts
+    }
+
+    concept_languages = {
+        concept : max([
+            colex['languages'] for colex in colexifications if
+            concept == colex['concepticon_gloss_a'] or
+            concept == colex['concepticon_gloss_b'] ])
+        for concept in concepts
+    }
+
+    concept_words = {
+        concept : max([
+            colex['words'] for colex in colexifications if
+            concept == colex['concepticon_gloss_a'] or
+            concept == colex['concepticon_gloss_b'] ])
+        for concept in concepts
+    }
+
     # For all colexifications, collect the two concepts involved and
     # compute the weight
     weights = {}
@@ -99,27 +132,45 @@ def compute_weights(concepticon, infomap, colexifications, args):
         gloss_a = colex['concepticon_gloss_a']
         gloss_b = colex['concepticon_gloss_b']
 
+        # Compute correction ratios
+        f_ratio = 1.0 - \
+            min([concept_families[gloss_a], concept_families[gloss_b]]) / \
+            max([concept_families[gloss_a], concept_families[gloss_b]])
+        l_ratio = 1.0 - \
+            min([concept_families[gloss_a], concept_families[gloss_b]]) / \
+            max([concept_languages[gloss_a], concept_languages[gloss_b]])
+        w_ratio = 1.0 - \
+            min([concept_words[gloss_a], concept_words[gloss_b]]) / \
+            max([concept_words[gloss_a], concept_words[gloss_b]])
+
         # Compute the weight from family, language, and word counts in
         # relation to the global maximum, also correcting by the user-defined
         # or default exponents
-        weight = (max_families - colex['families']) ** args.f_exp   + \
-                 (max_languages - colex['languages']) ** args.l_exp + \
-                 (max_words - colex['words']) ** args.w_exp
+        weight  = ((max_families  - colex['families'])  ** f_ratio) ** \
+                (1./args.f_dexp)
+        weight += ((max_languages - colex['languages']) ** l_ratio) ** \
+                (1./args.l_dexp)
+        weight += ((max_words     - colex['words'])     ** w_ratio) ** \
+                (1./args.w_dexp)
 
         # Correct weight if the concepts belong to the same cluster
         if infomap[cid_a]['cluster_name'] == infomap[cid_b]['cluster_name']:
             weight = weight ** args.cluster_exp
 
         # Store the weight
-        weights[(gloss_a, gloss_b)] = weight
+        key = tuple(sorted([gloss_a, gloss_b]))
+        weights[key] = weight
 
     return weights
 
+
+# todo: CACHE, exchangin memory for speed (no `graph` query) -- but consider
+# birectionality
 def comp_weight(path, graph):
     """
     Compute the cumulative weight associated with a path in a graph.
     """
-    
+
     return sum([
         graph.edges[(edge[0], edge[1])]['weight']
         for edge in _pairwise(path)
@@ -139,8 +190,9 @@ def output_distances(graph, args):
     headers = ['id', 'concept_a', 'concept_b', 'distance'] + \
         list(chain.from_iterable([
             ["path-%i" % i, "steps-%i" % i, "weight-%i" % i] for i in range(args.k)]
-        )) + \
-        ["path-so", "steps-so", "weight-so"]
+        ))
+    if args.suboptimal:
+        headers += ["path-so", "steps-so", "weight-so"]
     headers_len = len(headers)
     handler.write("\t".join(headers))
     handler.write("\n")
@@ -155,7 +207,7 @@ def output_distances(graph, args):
         if comb_idx % 100 == 0:
             print("[%s] Processing combination #%i/%i..." %
                 (datetime.datetime.now(), comb_idx+1, ncr))
- 
+
         # Collect args.paths shortest paths for the combination, skipping
         # over if there is no path for the current combination. This will
         # collect a higher number of paths, so we can look for the weight of
@@ -167,31 +219,37 @@ def output_distances(graph, args):
         try:
             k_paths = list(islice(
                 nx.shortest_simple_paths(graph, comb[0], comb[1], weight='weight'),
-                args.k*args.search))
+                args.search))
         except:
             # no path
             continue
 
-        # Compute the cumulative weight associated with each path 
+        # Compute the cumulative weight associated with each path --
+        # unfortunately, `nx.shortest_simple_paths` does not return it
         k_weights = [comp_weight(path, graph) for path in k_paths]
 
         # Build a sorted list of (path, weights) elements
+        # TODO see if it can be faster, probably removing list, perhaps
+        # a list comprehension for the zip
         paths = list(zip(k_paths, k_weights))
         paths = sorted(paths, key=itemgetter(1))
-            
+
         # Get the sub-optimal best path without the intermediate steps of
         # the best global path; if no exclude path is found, we will use the
         # score from the worst one we collected
-        excludes = set(chain.from_iterable([path[0][1:-1] for path in paths[:args.k]]))
-        exclude_paths = [
-            path for path in paths
-            if not any([concept in path[0] for concept in excludes])
-        ]
-        
-        if exclude_paths:
-            paths = paths[:3] + [exclude_paths[0]]
+        if not args.suboptimal:
+            paths = paths[:args.k]
         else:
-            paths = paths[:3] + [paths[-1]]
+            excludes = set(chain.from_iterable([path[0][1:-1] for path in paths[:args.k]]))
+            exclude_paths = [
+                path for path in paths
+                if not any([concept in path[0] for concept in excludes])
+            ]
+
+            if exclude_paths:
+                paths = paths[:args.k] + [exclude_paths[0]]
+            else:
+                paths = paths[:args.k] + [paths[-1]]
 
         # For easier manipulation, extract list of concepts and weights and
         # proceed building the output
@@ -203,6 +261,7 @@ def output_distances(graph, args):
         weights_strs = ["%0.2f" % weight for weight in weights]
 
         # Build buffer and write
+        # TODO can cache len(weights) -- but what if suboptimal? an if?
         computed_data = chain.from_iterable(zip(path_strs, steps, weights_strs))
         buf = [
             str(row_count),
@@ -212,6 +271,7 @@ def output_distances(graph, args):
         ] + list(computed_data)
 
         # Add empty items to the list if necessary
+        # TODO: make as a string before `\n`, no need for list
         buf += [""] * (headers_len - len(buf))
 
         # Write to handler and update counter
@@ -219,7 +279,8 @@ def output_distances(graph, args):
         handler.write("\n")
         row_count += 1
 
-        if comb_idx == 10:
+        # DEBUG
+        if comb_idx == 5000:
             break
 
     # Close handler and return
@@ -257,19 +318,19 @@ if __name__ == "__main__":
     # Define the parser for when called from the command-line
     parser = argparse.ArgumentParser(description="Compute semantic shift distances.")
     parser.add_argument(
-        "--f_exp",
+        "--f_dexp",
         type=float,
-        help="Exponent for family count correction (default: 1.0)",
+        help="Denominator exponent for family count correction (default: 3.0)",
         default=1.0)
     parser.add_argument(
-        "--l_exp",
+        "--l_dexp",
         type=float,
-        help="Exponent for language count correction (default: 1.2)",
+        help="Denominator exponent for language count correction (default: 2.0)",
         default=1.2)
     parser.add_argument(
-        "--w_exp",
+        "--w_dexp",
         type=float,
-        help="Exponent for word count correction (default: 1.4)",
+        help="Denominator exponent for word count correction (default: 1.0)",
         default=1.4)
     parser.add_argument(
         "--cluster_exp",
@@ -294,8 +355,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--search",
         type=int,
-        help="Multiplier for the search space of best suboptimal path (default: 25)",
-        default=25)
+        help="Multiplier for the search space of best suboptimal path (default: 5)",
+        default=5)
+    parser.add_argument(
+        '--suboptimal',
+        action='store_true',
+        help="Whether to search for suboptimal paths (expansive, default: False)")
     ARGS = parser.parse_args()
 
     main(ARGS)
