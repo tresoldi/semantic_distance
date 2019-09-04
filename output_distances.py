@@ -73,7 +73,7 @@ def output_distances(graph, args):
         # Skip what was already done
         if comb_idx < args.start:
             continue
-    
+
         # See if we should write/report
         if comb_idx % 100 == 0:
             print("[%s] Writing until combination #%i (row count %i)..." %
@@ -83,7 +83,7 @@ def output_distances(graph, args):
                 handler.write("\n")
             handler.flush()
             buffer = []
-  
+
             print("[%s] Processing combination #%i/%i..." %
                 (datetime.datetime.now(), comb_idx, ncr))
 
@@ -156,9 +156,9 @@ def output_distances(graph, args):
         # Write to handler and update counter
         buffer.append("\t".join(buf))
         row_count += 1
-        
-        if row_count == 300:
-            break
+
+#        if row_count == 300:
+#            break
 
     # Close handler and return
     handler.close()
@@ -168,10 +168,10 @@ def main(args):
     """
     Main function, reading data and generating output.
     """
-    
+
     # Input graph
-    graph = nx.read_gml("output/graph.gml")    
-    
+    graph = nx.read_gml("output/graph.gml")
+
     # Output the distance for all possible pairs
     output_distances(graph, args)
 
